@@ -4,7 +4,7 @@ import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, 
 // --- Configuration ---
 // In production (Vercel), uncomment the line below to pull from the "VITE_GEMINI_API_KEY" environment variable.
 const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
-const ENV_API_KEY = "";
+
 
 // 20MB is the rough limit for inline base64 payloads in the Gemini API
 const MAX_FILE_SIZE_MB = 20;
