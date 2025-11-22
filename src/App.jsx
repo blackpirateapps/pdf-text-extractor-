@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink, RefreshCw } from 'lucide-react';
+import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink, RefreshCw, Search, CheckCircle2 } from 'lucide-react';
 
 // --- Configuration ---
 // In Vercel/Vite, we access environment variables via import.meta.env
@@ -70,9 +70,45 @@ const Header = ({ isDarkMode, toggleTheme, onOpenSettings }) => (
 
 // --- Component: SettingsModal ---
 const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, prompt, setPrompt }) => {
+  const [checkingModels, setCheckingModels] = useState(false);
+  const [availableModels, setAvailableModels] = useState(null);
+  const [checkError, setCheckError] = useState("");
+
   if (!isOpen) return null;
 
   const isUsingEnvKey = !!ENV_API_KEY;
+
+  const checkAvailableModels = async () => {
+    const keyToUse = ENV_API_KEY || apiKey;
+    if (!keyToUse) {
+      setCheckError("Please enter an API Key first.");
+      return;
+    }
+
+    setCheckingModels(true);
+    setAvailableModels(null);
+    setCheckError("");
+
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${keyToUse}`);
+      if (!response.ok) {
+        if (response.status === 400) throw new Error("Invalid API Key");
+        throw new Error("Failed to fetch models");
+      }
+      
+      const data = await response.json();
+      // Filter to just Gemini models that support content generation
+      const geminiModels = data.models
+        .filter(m => m.name.includes("gemini") && m.supportedGenerationMethods.includes("generateContent"))
+        .map(m => m.name.replace("models/", ""));
+      
+      setAvailableModels(geminiModels);
+    } catch (err) {
+      setCheckError(err.message || "Could not verify models.");
+    } finally {
+      setCheckingModels(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
@@ -120,9 +156,20 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
           </div>
           
           <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Model Selection
-            </label>
+            <div className="flex justify-between items-baseline mb-1">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                Model Selection
+              </label>
+              <button 
+                onClick={checkAvailableModels}
+                disabled={checkingModels || (!apiKey && !isUsingEnvKey)}
+                className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {checkingModels ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
+                Check Availability
+              </button>
+            </div>
+            
             <select 
               value={model} 
               onChange={(e) => setModel(e.target.value)}
@@ -131,10 +178,38 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
               <option value="gemini-1.5-flash">Gemini 1.5 Flash (Stable)</option>
               <option value="gemini-1.5-pro">Gemini 1.5 Pro (Best Quality)</option>
               <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash 8B (Fastest)</option>
+              {/* Add an option for custom inputs if the check reveals other models */}
+              {!["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"].includes(model) && (
+                <option value={model}>{model} (Custom/Saved)</option>
+              )}
             </select>
-            <p className="text-xs text-gray-400 mt-2">
-              Note: If you get a 404 error, switch to "Gemini 1.5 Flash".
-            </p>
+            
+            {/* Availability Results */}
+            {checkError && (
+              <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" /> {checkError}
+              </p>
+            )}
+            {availableModels && (
+              <div className="mt-3 p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg border border-gray-100 dark:border-gray-600">
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Models available to your API Key:</p>
+                <div className="flex flex-wrap gap-2">
+                  {availableModels.map(m => (
+                    <button
+                      key={m}
+                      onClick={() => setModel(m)}
+                      className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
+                        model === m 
+                          ? 'bg-blue-100 border-blue-200 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300' 
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-blue-300 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-300'
+                      }`}
+                    >
+                      {m} {model === m && "✓"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
@@ -381,8 +456,6 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || "");
   
   // SAFE MODEL INITIALIZATION:
-  // We only accept model names that are in our allowed list. 
-  // This prevents 404s if the user has an old/deprecated model string saved in localStorage.
   const [modelName, setModelName] = useState(() => {
     const saved = localStorage.getItem('gemini_model');
     if (saved && VALID_MODELS.includes(saved)) {
