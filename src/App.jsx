@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink, RefreshCw, Search, CheckCircle2 } from 'lucide-react';
+import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink, RefreshCw, Search, Layers, Merge, Download } from 'lucide-react';
+import { PDFDocument } from 'pdf-lib'; 
 
 // --- Configuration ---
 // In Vercel/Vite, we access environment variables via import.meta.env
@@ -9,14 +10,14 @@ import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, 
 // FOR PREVIEW: We use an empty string so you can set the key in the UI settings
 const ENV_API_KEY = "";
 
-// 20MB is the rough limit for inline base64 payloads in the Gemini API
-const MAX_FILE_SIZE_MB = 20;
-const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
+// 20MB is the hard limit for Gemini API inline files.
+// We split PDFs to stay well under this limit.
+const MAX_CHUNK_SIZE_MB = 19.5; 
+const MAX_CHUNK_SIZE_BYTES = MAX_CHUNK_SIZE_MB * 1024 * 1024;
 
 const DEFAULT_MODEL = "gemini-1.5-flash"; 
 const DEFAULT_PROMPT = "Please transcribe the full text of this PDF document accurately. Maintain the logical flow of paragraphs. If there are tables, represent them with simple markdown formatting.";
 
-// Valid models allowlist to prevent 404s from stale localStorage data
 const VALID_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"];
 
 // --- Helper: File to Base64 ---
@@ -43,10 +44,10 @@ const Header = ({ isDarkMode, toggleTheme, onOpenSettings }) => (
     <div>
       <h1 className="text-3xl font-bold text-gray-900 dark:text-white tracking-tight flex items-center gap-2">
         <Sparkles className="w-6 h-6 text-blue-500" />
-        PDF Extract
+        PDF Extract <span className="text-xs font-normal text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-0.5 rounded-full">Pro</span>
       </h1>
       <p className="text-gray-500 dark:text-gray-400 mt-2 text-lg">
-        Extract text from your documents using AI.
+        Extract text from large documents using AI.
       </p>
     </div>
     <div className="flex items-center gap-3">
@@ -75,7 +76,6 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
   const [checkError, setCheckError] = useState("");
 
   if (!isOpen) return null;
-
   const isUsingEnvKey = !!ENV_API_KEY;
 
   const checkAvailableModels = async () => {
@@ -84,24 +84,17 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
       setCheckError("Please enter an API Key first.");
       return;
     }
-
     setCheckingModels(true);
     setAvailableModels(null);
     setCheckError("");
 
     try {
       const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${keyToUse}`);
-      if (!response.ok) {
-        if (response.status === 400) throw new Error("Invalid API Key");
-        throw new Error("Failed to fetch models");
-      }
-      
+      if (!response.ok) throw new Error("Failed to fetch models");
       const data = await response.json();
-      // Filter to just Gemini models that support content generation
       const geminiModels = data.models
         .filter(m => m.name.includes("gemini") && m.supportedGenerationMethods.includes("generateContent"))
         .map(m => m.name.replace("models/", ""));
-      
       setAvailableModels(geminiModels);
     } catch (err) {
       setCheckError(err.message || "Could not verify models.");
@@ -123,7 +116,6 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
         </div>
 
         <div className="space-y-6">
-          {/* API Key Section */}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Google Gemini API Key
@@ -134,42 +126,19 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
                 value={isUsingEnvKey ? "**********************" : apiKey}
                 onChange={(e) => !isUsingEnvKey && setApiKey(e.target.value)}
                 disabled={isUsingEnvKey}
-                placeholder={isUsingEnvKey ? "Provided by Environment" : "Enter your API Key..."}
                 className={`w-full pl-10 pr-4 py-2 rounded-lg border ${isUsingEnvKey ? "bg-gray-100 dark:bg-gray-700/30 text-gray-500 cursor-not-allowed" : "bg-gray-50 dark:bg-gray-700/50 text-gray-900 dark:text-white"} border-gray-200 dark:border-gray-600 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all`}
               />
               <Key className="w-4 h-4 text-gray-400 absolute left-3 top-3" />
             </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-              {isUsingEnvKey ? (
-                <span className="text-green-600 dark:text-green-400 flex items-center gap-1">
-                  <Check className="w-3 h-3" /> Key configured via Environment Variables
-                </span>
-              ) : (
-                <>
-                  Your key is stored locally in your browser. 
-                  <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline ml-1">
-                    Get a key here.
-                  </a>
-                </>
-              )}
-            </p>
           </div>
           
           <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
             <div className="flex justify-between items-baseline mb-1">
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Model Selection
-              </label>
-              <button 
-                onClick={checkAvailableModels}
-                disabled={checkingModels || (!apiKey && !isUsingEnvKey)}
-                className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {checkingModels ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
-                Check Availability
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Model Selection</label>
+              <button onClick={checkAvailableModels} disabled={checkingModels} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                {checkingModels ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />} Check
               </button>
             </div>
-            
             <select 
               value={model} 
               onChange={(e) => setModel(e.target.value)}
@@ -178,64 +147,29 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
               <option value="gemini-1.5-flash">Gemini 1.5 Flash (Stable)</option>
               <option value="gemini-1.5-pro">Gemini 1.5 Pro (Best Quality)</option>
               <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash 8B (Fastest)</option>
-              {/* Add an option for custom inputs if the check reveals other models */}
-              {!["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"].includes(model) && (
-                <option value={model}>{model} (Custom/Saved)</option>
-              )}
+              {!["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"].includes(model) && <option value={model}>{model} (Custom)</option>}
             </select>
-            
-            {/* Availability Results */}
-            {checkError && (
-              <p className="text-xs text-red-500 mt-2 flex items-center gap-1">
-                <AlertCircle className="w-3 h-3" /> {checkError}
-              </p>
-            )}
             {availableModels && (
-              <div className="mt-3 p-3 bg-gray-50 dark:bg-gray-700/30 rounded-lg border border-gray-100 dark:border-gray-600">
-                <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Models available to your API Key:</p>
-                <div className="flex flex-wrap gap-2">
-                  {availableModels.map(m => (
-                    <button
-                      key={m}
-                      onClick={() => setModel(m)}
-                      className={`text-[10px] px-2 py-1 rounded-full border transition-colors ${
-                        model === m 
-                          ? 'bg-blue-100 border-blue-200 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300' 
-                          : 'bg-white border-gray-200 text-gray-600 hover:border-blue-300 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-300'
-                      }`}
-                    >
-                      {m} {model === m && "✓"}
-                    </button>
-                  ))}
-                </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {availableModels.map(m => (
+                  <button key={m} onClick={() => setModel(m)} className="text-[10px] px-2 py-1 rounded-full border bg-gray-50 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
+                    {m}
+                  </button>
+                ))}
               </div>
             )}
           </div>
 
           <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1 flex items-center justify-between">
-              <span>System Prompt</span>
-              <button 
-                onClick={() => setPrompt(DEFAULT_PROMPT)}
-                className="text-xs text-blue-500 hover:underline font-normal"
-              >
-                Reset to Default
-              </button>
-            </label>
-            <div className="relative">
-              <textarea 
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                rows={4}
-                className="w-full p-3 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-none"
-              />
-            </div>
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-              Customize how the AI reads the document. E.g., "Extract as a JSON list" or "Summarize in 3 bullet points".
-            </p>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">System Prompt</label>
+            <textarea 
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={4}
+              className="w-full p-3 rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700/50 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+            />
           </div>
         </div>
-
         <div className="mt-8 flex justify-end">
           <Button onClick={onClose}>Done</Button>
         </div>
@@ -244,169 +178,9 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
   );
 };
 
-// --- Component: Footer ---
-const Footer = () => (
-  <div className="text-center py-8 space-y-2">
-    <p className="text-xs text-gray-400 dark:text-gray-600">
-      Powered by Google Gemini • Supports PDF up to {MAX_FILE_SIZE_MB}MB
-    </p>
-    <a 
-      href="https://blackpiratex.com" 
-      target="_blank" 
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-blue-500 dark:text-gray-500 dark:hover:text-blue-400 transition-colors"
-    >
-      Made by blackpiratex
-      <ExternalLink className="w-3 h-3" />
-    </a>
-  </div>
-);
-
-const Card = ({ children, className = "" }) => (
-  <div className={`bg-white dark:bg-gray-800 rounded-2xl shadow-[0_4px_24px_rgba(0,0,0,0.04)] dark:shadow-none border border-gray-100 dark:border-gray-700 overflow-hidden ${className}`}>
-    {children}
-  </div>
-);
-
-const Button = ({ children, onClick, disabled, variant = "primary", className = "" }) => {
-  const baseStyle = "px-5 py-2.5 rounded-full font-medium transition-all duration-200 flex items-center gap-2 justify-center disabled:opacity-50 disabled:cursor-not-allowed active:scale-95";
-  
-  const variants = {
-    primary: "bg-blue-500 hover:bg-blue-600 text-white shadow-md hover:shadow-lg shadow-blue-500/20 disabled:shadow-none",
-    secondary: "bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200",
-    ghost: "bg-transparent hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200",
-    danger: "bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-900/20 dark:hover:bg-red-900/30 dark:text-red-400"
-  };
-
-  return (
-    <button 
-      onClick={onClick} 
-      disabled={disabled} 
-      className={`${baseStyle} ${variants[variant]} ${className}`}
-    >
-      {children}
-    </button>
-  );
-};
-
-// --- Component: FileDropZone ---
-const FileDropZone = ({ onFileSelect, selectedFile, onClear }) => {
-  const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef(null);
-
-  const handleDrag = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
-      setIsDragging(true);
-    } else if (e.type === "dragleave") {
-      setIsDragging(false);
-    }
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      validateAndSetFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  const validateAndSetFile = (file) => {
-    if (file.type !== "application/pdf") {
-      alert("Please upload a PDF file.");
-      return;
-    }
-    if (file.size > MAX_FILE_SIZE_BYTES) {
-      alert(`File is too large. Max size is ${MAX_FILE_SIZE_MB}MB.`);
-      return;
-    }
-    onFileSelect(file);
-  };
-
-  const handleChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      validateAndSetFile(e.target.files[0]);
-    }
-  };
-
-  if (selectedFile) {
-    return (
-      <div className="p-6 bg-gray-50 dark:bg-gray-700/50 rounded-xl border border-gray-200 dark:border-gray-600 flex items-center justify-between animate-in fade-in duration-300">
-        <div className="flex items-center gap-4 overflow-hidden">
-          <div className="w-12 h-12 bg-white dark:bg-gray-700 rounded-lg shadow-sm flex items-center justify-center border border-gray-100 dark:border-gray-600 flex-shrink-0">
-            <FileText className="w-6 h-6 text-red-500" />
-          </div>
-          <div className="min-w-0">
-            <p className="font-semibold text-gray-900 dark:text-gray-100 truncate">{selectedFile.name}</p>
-            <p className="text-sm text-gray-500 dark:text-gray-400">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-          </div>
-        </div>
-        <Button variant="ghost" onClick={onClear} className="!p-2 rounded-full">
-          <X className="w-5 h-5" />
-        </Button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      onDragEnter={handleDrag}
-      onDragLeave={handleDrag}
-      onDragOver={handleDrag}
-      onDrop={handleDrop}
-      onClick={() => fileInputRef.current?.click()}
-      className={`
-        relative group cursor-pointer
-        flex flex-col items-center justify-center
-        h-48 rounded-xl border-2 border-dashed transition-all duration-300
-        ${isDragging 
-          ? "border-blue-400 bg-blue-50 dark:bg-blue-900/20" 
-          : "border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-800/50 hover:bg-gray-50 dark:hover:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-500"
-        }
-      `}
-    >
-      <input
-        type="file"
-        ref={fileInputRef}
-        onChange={handleChange}
-        accept="application/pdf"
-        className="hidden"
-      />
-      <div className="bg-white dark:bg-gray-700 p-3 rounded-full shadow-sm mb-3 group-hover:scale-110 transition-transform duration-300">
-        <Upload className={`w-6 h-6 ${isDragging ? 'text-blue-500' : 'text-gray-400 dark:text-gray-300'}`} />
-      </div>
-      <p className="text-sm font-medium text-gray-700 dark:text-gray-200">Click or drop PDF here</p>
-      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Up to {MAX_FILE_SIZE_MB}MB</p>
-    </div>
-  );
-};
-
-// --- Component: ProcessingStatus ---
-const ProcessingStatus = ({ statusText, progress }) => {
-  return (
-    <div className="py-8 px-4 flex flex-col items-center justify-center animate-in fade-in duration-500">
-      <div className="w-full max-w-xs mb-4">
-        <div className="h-2 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden">
-          <div 
-            className="h-full bg-blue-500 transition-all duration-300 ease-out rounded-full"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      </div>
-      <div className="flex items-center gap-3 text-gray-500 dark:text-gray-400">
-        <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
-        <span className="text-sm font-medium font-mono">{statusText}</span>
-      </div>
-    </div>
-  );
-};
-
-// --- Component: ResultView ---
-const ResultView = ({ text }) => {
+// --- Component: CopyButton ---
+const CopyButton = ({ text, label = "Copy" }) => {
   const [copied, setCopied] = useState(false);
-
   const handleCopy = () => {
     const textArea = document.createElement('textarea');
     textArea.value = text;
@@ -416,292 +190,278 @@ const ResultView = ({ text }) => {
       document.execCommand('copy');
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch (err) {
-      console.error('Fallback: Oops, unable to copy', err);
-    }
+    } catch (err) { console.error(err); }
     document.body.removeChild(textArea);
   };
-
   return (
-    <div className="animate-in slide-in-from-bottom-4 duration-500">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">Extracted Content</h3>
-        <Button variant="secondary" onClick={handleCopy} className="!py-1.5 !px-3 !text-sm">
-          {copied ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
-          {copied ? "Copied" : "Copy"}
-        </Button>
-      </div>
-      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-inner min-h-[200px] max-h-[500px] overflow-y-auto relative group">
-        <pre className="p-6 font-mono text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed">
-          {text}
-        </pre>
-      </div>
-    </div>
+    <Button variant="secondary" onClick={handleCopy} className="!py-1.5 !px-3 !text-xs">
+      {copied ? <Check className="w-3 h-3 text-green-600" /> : <Copy className="w-3 h-3" />}
+      {copied ? "Copied" : label}
+    </Button>
   );
 };
+
+// --- Component: DownloadButton (New) ---
+const DownloadButton = ({ text, filename = "extracted-text.txt" }) => {
+  const handleDownload = () => {
+    const element = document.createElement("a");
+    const file = new Blob([text], { type: 'text/plain' });
+    element.href = URL.createObjectURL(file);
+    element.download = filename;
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+  };
+  return (
+    <Button variant="secondary" onClick={handleDownload} className="!py-1.5 !px-3 !text-xs">
+      <Download className="w-3 h-3" /> Download .txt
+    </Button>
+  );
+};
+
+// --- Component: ResultChunk ---
+const ResultChunk = ({ chunkIndex, text, totalChunks }) => (
+  <div className="mb-4 bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden shadow-sm">
+    <div className="px-4 py-3 bg-gray-50 dark:bg-gray-700/50 border-b border-gray-100 dark:border-gray-700 flex items-center justify-between">
+      <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+        Chunk {chunkIndex + 1} of {totalChunks}
+      </span>
+      <div className="flex gap-2">
+         <CopyButton text={text} />
+      </div>
+    </div>
+    <div className="p-4 max-h-64 overflow-y-auto">
+      <pre className="font-mono text-xs text-gray-800 dark:text-gray-200 whitespace-pre-wrap">{text}</pre>
+    </div>
+  </div>
+);
 
 // --- Main Application ---
 
 export default function App() {
   // State
   const [file, setFile] = useState(null);
-  const [status, setStatus] = useState('idle');
-  const [progressData, setProgressData] = useState({ percent: 0, text: '' });
-  const [result, setResult] = useState('');
+  const [status, setStatus] = useState('idle'); // idle, processing, success, error
+  const [progressData, setProgressData] = useState({ current: 0, total: 0, text: '' });
+  const [results, setResults] = useState([]); // Array of { index, text }
   const [errorMsg, setErrorMsg] = useState('');
+  
+  // Settings
+  const [chunkSize, setChunkSize] = useState(20);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-
-  // Config State
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || "");
   
-  // SAFE MODEL INITIALIZATION:
+  // Safe model init
   const [modelName, setModelName] = useState(() => {
     const saved = localStorage.getItem('gemini_model');
-    if (saved && VALID_MODELS.includes(saved)) {
-      return saved;
-    }
-    return DEFAULT_MODEL;
+    return (saved && VALID_MODELS.includes(saved)) ? saved : DEFAULT_MODEL;
   });
-  
   const [customPrompt, setCustomPrompt] = useState(() => localStorage.getItem('gemini_prompt') || DEFAULT_PROMPT);
 
-  // Effect: Persist Config
+  // Persistence
   useEffect(() => {
     localStorage.setItem('gemini_api_key', apiKey);
     localStorage.setItem('gemini_model', modelName);
     localStorage.setItem('gemini_prompt', customPrompt);
   }, [apiKey, modelName, customPrompt]);
 
-  // Effect: Dark Mode
   useEffect(() => {
-    if (isDarkMode) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    document.documentElement.classList.toggle('dark', isDarkMode);
   }, [isDarkMode]);
 
   const toggleTheme = () => setIsDarkMode(!isDarkMode);
+  const reset = () => { setFile(null); setStatus('idle'); setResults([]); setErrorMsg(''); setProgressData({ current:0, total:0, text:'' }); };
 
-  const handleResetModel = () => {
-    setModelName(DEFAULT_MODEL);
-    setStatus('idle');
-    setErrorMsg('');
-    handleExtract(DEFAULT_MODEL); // Retry with default
-  };
-
-  const handleExtract = async (overrideModel = null) => {
+  // --- CORE LOGIC: PDF SPLIT & PROCESS ---
+  const processPDF = async () => {
     if (!file) return;
-    
-    const effectiveKey = ENV_API_KEY || apiKey;
-    const effectiveModel = overrideModel || modelName;
-    
-    if (!effectiveKey) {
-        setShowSettings(true);
-        setErrorMsg("Please configure your API Key in settings first.");
-        setStatus('error');
-        return;
-    }
+    const key = ENV_API_KEY || apiKey;
+    if (!key) { setShowSettings(true); return; }
 
     setStatus('processing');
     setErrorMsg('');
-    setResult('');
+    setResults([]);
     
     try {
-      // Stage 1: Reading File
-      setProgressData({ percent: 10, text: 'Reading PDF...' });
-      const filePart = await fileToGenerativePart(file);
+      setProgressData({ current: 0, total: 0, text: 'Loading PDF...' });
       
-      // Stage 2: Preparing Request
-      setProgressData({ percent: 30, text: 'Connecting to Gemini...' });
+      // 1. Load PDF
+      const arrayBuffer = await file.arrayBuffer();
+      const srcDoc = await PDFDocument.load(arrayBuffer);
+      const totalPages = srcDoc.getPageCount();
+      const totalChunks = Math.ceil(totalPages / chunkSize);
       
-      const payload = {
-        contents: [{
-          parts: [
-            { text: customPrompt },
-            filePart
-          ]
-        }]
-      };
+      setProgressData({ current: 0, total: totalChunks, text: `Splitting ${totalPages} pages...` });
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${effectiveKey}`;
+      const chunks = [];
       
-      // Stage 3: Sending & Waiting
-      setProgressData({ percent: 40, text: 'Analyzing document structure...' });
-      
-      let attempt = 0;
-      const maxRetries = 5;
-      const delays = [1000, 2000, 4000, 8000, 16000];
-      
-      const progressInterval = setInterval(() => {
-        setProgressData(prev => {
-          if (prev.percent < 90) {
-            let newText = prev.text;
-            if (prev.percent > 50) newText = 'Extracting text content...';
-            if (prev.percent > 75) newText = 'Formatting output...';
-            return { percent: prev.percent + 5, text: newText };
-          }
-          return prev;
-        });
-      }, 800);
-
-      let extractedText = "No text found.";
-
-      try {
-        while (attempt <= maxRetries) {
-          try {
-            const response = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(payload)
-            });
-
-            if (!response.ok) {
-               const errorData = await response.json().catch(() => ({}));
-               
-               // Handle specific HTTP errors
-               if (response.status === 404) {
-                 throw new Error("MODEL_NOT_FOUND");
-               }
-               if (response.status === 403 || response.status === 400) {
-                   throw new Error(errorData.error?.message || "Invalid API Key or Bad Request");
-               }
-               throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const data = await response.json();
-            
-            if (data.error) {
-              throw new Error(data.error.message);
-            }
-
-            extractedText = data.candidates?.[0]?.content?.parts?.[0]?.text || "No text found.";
-            break; // Success
-
-          } catch (e) {
-            if (e.message === "MODEL_NOT_FOUND") throw e;
-            if (attempt === maxRetries || e.message.includes("Invalid API Key")) throw e;
-            
-            setProgressData({ percent: 40 + (attempt * 10), text: `Retrying connection (${attempt + 1}/${maxRetries})...` });
-            await new Promise(resolve => setTimeout(resolve, delays[attempt]));
-            attempt++;
-          }
+      // 2. Split PDF logic
+      for (let i = 0; i < totalPages; i += chunkSize) {
+        const subDoc = await PDFDocument.create();
+        const pageIndices = Array.from({ length: Math.min(chunkSize, totalPages - i) }, (_, k) => i + k);
+        const copiedPages = await subDoc.copyPages(srcDoc, pageIndices);
+        copiedPages.forEach((page) => subDoc.addPage(page));
+        
+        // Convert chunk to base64
+        const base64 = await subDoc.saveAsBase64();
+        
+        // 3. Size Check
+        const sizeInBytes = base64.length * 0.75; // Approx decoding size
+        if (sizeInBytes > MAX_CHUNK_SIZE_BYTES) {
+          throw new Error(`Chunk ${chunks.length + 1} (Pages ${i+1}-${Math.min(i+chunkSize, totalPages)}) is too large (${(sizeInBytes/1024/1024).toFixed(2)}MB). Limit is ${MAX_CHUNK_SIZE_MB}MB. Please reduce "Pages per chunk" and try again.`);
         }
-      } finally {
-        clearInterval(progressInterval);
+        
+        chunks.push({ base64, index: chunks.length });
       }
-      
-      setProgressData({ percent: 100, text: 'Complete!' });
-      
-      setTimeout(() => {
-        setResult(extractedText);
-        setStatus('success');
-      }, 500);
+
+      // 4. Sequential Processing
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        setProgressData({ current: i + 1, total: totalChunks, text: `Processing chunk ${i+1} of ${totalChunks}...` });
+        
+        const text = await extractFromChunk(chunk.base64, key);
+        setResults(prev => [...prev, { index: i, text }]);
+      }
+
+      setStatus('success');
 
     } catch (err) {
       console.error(err);
-      if (err.message === "MODEL_NOT_FOUND") {
-        setErrorMsg("Model not found. Please reset model settings.");
-        // Auto-recover: force reset state to default if current model failed
-        if (modelName !== DEFAULT_MODEL) {
-             setModelName(DEFAULT_MODEL);
-        }
-      } else {
-        setErrorMsg(err.message || "Failed to extract text. Please try again.");
-      }
+      setErrorMsg(err.message || "Extraction failed.");
       setStatus('error');
     }
   };
 
-  const reset = () => {
-    setFile(null);
-    setStatus('idle');
-    setResult('');
-    setErrorMsg('');
-    setProgressData({ percent: 0, text: '' });
+  const extractFromChunk = async (base64Data, key) => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${key}`;
+    const payload = {
+      contents: [{
+        parts: [
+          { text: customPrompt },
+          { inlineData: { mimeType: "application/pdf", data: base64Data } }
+        ]
+      }]
+    };
+
+    let attempt = 0;
+    while (attempt <= 3) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+           if (response.status === 429) throw new Error("RATE_LIMIT"); // Retry on rate limit
+           if (response.status === 404) throw new Error("Model not found. Please check settings.");
+           throw new Error(`API Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "[No Text Extracted]";
+      } catch (e) {
+        if (attempt === 3) throw e;
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1))); // Backoff
+        attempt++;
+      }
+    }
   };
 
-  const hasEnvKey = !!ENV_API_KEY;
-  const hasUserKey = !!apiKey && apiKey.length > 5;
-  const isReady = hasEnvKey || hasUserKey;
+  const mergedResult = results.map(r => r.text).join("\n\n--- [Next Chunk] ---\n\n");
 
   return (
-    <div className={`min-h-screen font-sans transition-colors duration-300 ${isDarkMode ? 'bg-[#1a1a1a] text-white selection:bg-blue-500 selection:text-white' : 'bg-[#f8f9fa] text-gray-900 selection:bg-blue-100 selection:text-blue-900'} flex flex-col`}>
-      <SettingsModal 
-        isOpen={showSettings} 
-        onClose={() => setShowSettings(false)}
-        apiKey={apiKey}
-        setApiKey={setApiKey}
-        model={modelName}
-        setModel={setModelName}
-        prompt={customPrompt}
-        setPrompt={setCustomPrompt}
-      />
+    <div className={`min-h-screen font-sans transition-colors duration-300 ${isDarkMode ? 'bg-[#1a1a1a] text-white' : 'bg-[#f8f9fa] text-gray-900'} flex flex-col`}>
+      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} apiKey={apiKey} setApiKey={setApiKey} model={modelName} setModel={setModelName} prompt={customPrompt} setPrompt={setCustomPrompt} />
 
-      <div className="flex-grow max-w-2xl mx-auto w-full pt-6 md:pt-12 px-4 pb-12">
-        <Header 
-          isDarkMode={isDarkMode} 
-          toggleTheme={toggleTheme} 
-          onOpenSettings={() => setShowSettings(true)}
-        />
+      <div className="flex-grow max-w-3xl mx-auto w-full pt-6 md:pt-12 px-4 pb-12">
+        <Header isDarkMode={isDarkMode} toggleTheme={toggleTheme} onOpenSettings={() => setShowSettings(true)} />
         
         <div className="space-y-6">
-          {/* Input Section */}
-          <Card className="p-6 md:p-8 transition-colors duration-300">
-            <div className="space-y-6">
-              <FileDropZone 
-                selectedFile={file}
-                onFileSelect={setFile}
-                onClear={reset}
-              />
+          <div className={`bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-700 overflow-hidden p-6 md:p-8`}>
+            <FileDropZone selectedFile={file} onFileSelect={setFile} onClear={reset} />
 
-              {file && status !== 'processing' && status !== 'success' && (
-                <div className="flex flex-col gap-3 animate-in fade-in slide-in-from-top-2">
-                   {!isReady && (
-                      <div className="flex items-center gap-2 text-amber-500 text-xs justify-end">
-                        <AlertCircle className="w-3 h-3" />
-                        <span>API Key required in settings</span>
-                      </div>
-                   )}
-                  <div className="flex justify-end">
-                    <Button onClick={() => handleExtract()} className="w-full md:w-auto" disabled={!isReady}>
-                      Start Extraction
-                      <ArrowRight className="w-4 h-4" />
+            {/* Batch Settings */}
+            {file && status === 'idle' && (
+              <div className="mt-6 pt-6 border-t border-gray-100 dark:border-gray-700 animate-in fade-in">
+                 <div className="flex items-center justify-between mb-4">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                      <Layers className="w-4 h-4 text-blue-500" />
+                      Pages per Chunk
+                    </label>
+                    <input 
+                      type="number" 
+                      min="1" 
+                      max="100" 
+                      value={chunkSize} 
+                      onChange={(e) => setChunkSize(parseInt(e.target.value) || 1)}
+                      className="w-20 p-1.5 text-center rounded border border-gray-200 dark:border-gray-600 bg-transparent dark:text-white text-sm"
+                    />
+                 </div>
+                 <p className="text-xs text-gray-500 dark:text-gray-400 mb-6">
+                   Splitting the PDF ensures we don't exceed the AI's size limits. If you get a size error, reduce this number.
+                 </p>
+
+                 <div className="flex justify-end">
+                    <Button onClick={processPDF} className="w-full md:w-auto">
+                      Start Batch Extraction <ArrowRight className="w-4 h-4" />
                     </Button>
-                  </div>
-                </div>
-              )}
+                 </div>
+              </div>
+            )}
 
-              {status === 'processing' && (
-                <ProcessingStatus 
-                  statusText={progressData.text} 
-                  progress={progressData.percent} 
-                />
-              )}
+            {/* Progress View */}
+            {status === 'processing' && (
+              <div className="py-8 px-4 text-center animate-in fade-in">
+                 <div className="mb-4 relative h-2 bg-gray-100 dark:bg-gray-700 rounded-full overflow-hidden max-w-xs mx-auto">
+                    <div 
+                      className="absolute top-0 left-0 h-full bg-blue-500 transition-all duration-500"
+                      style={{ width: `${(progressData.current / (progressData.total || 1)) * 100}%` }}
+                    />
+                 </div>
+                 <p className="text-sm font-medium text-gray-600 dark:text-gray-300 flex items-center justify-center gap-2">
+                   <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                   {progressData.text}
+                 </p>
+                 <p className="text-xs text-gray-400 mt-1">Do not close this tab.</p>
+              </div>
+            )}
 
-              {status === 'error' && (
-                <div className="flex flex-col gap-3 animate-in shake">
-                  <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 rounded-lg text-sm flex items-center gap-2">
-                    <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                    {errorMsg}
-                  </div>
-                  {errorMsg.includes("Model not found") && (
-                     <div className="flex justify-end">
-                       <Button onClick={handleResetModel} variant="secondary" className="text-sm">
-                         <RefreshCw className="w-4 h-4" />
-                         Reset Model to Defaults
-                       </Button>
-                     </div>
-                  )}
+            {/* Error View */}
+            {status === 'error' && (
+              <div className="mt-6 p-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 rounded-lg text-sm flex items-start gap-3 animate-in shake">
+                <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-medium">Extraction Error</p>
+                  <p className="opacity-90">{errorMsg}</p>
+                  <button onClick={processPDF} className="mt-2 text-xs underline hover:text-red-800">Retry</button>
                 </div>
-              )}
+              </div>
+            )}
+          </div>
+
+          {/* Results Section */}
+          {(results.length > 0) && (
+            <div className="animate-in slide-in-from-bottom-4 duration-500 space-y-6">
+               {/* Merged Header */}
+               <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider flex items-center gap-2">
+                    <Merge className="w-4 h-4" /> Combined Results
+                  </h3>
+                  <div className="flex gap-2">
+                    <DownloadButton text={mergedResult} filename={`extracted-${file?.name.replace('.pdf', '')}.txt`} />
+                    <CopyButton text={mergedResult} label="Copy All" />
+                  </div>
+               </div>
+
+               {/* Individual Chunks */}
+               <div className="space-y-4">
+                 {results.map((r) => (
+                   <ResultChunk key={r.index} chunkIndex={r.index} text={r.text} totalChunks={progressData.total} />
+                 ))}
+               </div>
             </div>
-          </Card>
-
-          {/* Result Section */}
-          {status === 'success' && (
-            <ResultView text={result} />
           )}
 
           <Footer />
@@ -710,3 +470,49 @@ export default function App() {
     </div>
   );
 }
+
+// --- Sub-Components ---
+const Button = ({ children, onClick, disabled, variant="primary", className="" }) => {
+  const variants = {
+    primary: "bg-blue-500 hover:bg-blue-600 text-white shadow-blue-500/20",
+    secondary: "bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200",
+    ghost: "bg-transparent hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400"
+  };
+  return (
+    <button onClick={onClick} disabled={disabled} className={`px-5 py-2.5 rounded-full font-medium transition-all flex items-center gap-2 justify-center disabled:opacity-50 active:scale-95 ${variants[variant]} ${className}`}>
+      {children}
+    </button>
+  );
+};
+
+const FileDropZone = ({ onFileSelect, selectedFile, onClear }) => {
+  const inputRef = useRef(null);
+  const handleDrop = (e) => { e.preventDefault(); if(e.dataTransfer.files[0]) onFileSelect(e.dataTransfer.files[0]); };
+  return (
+    <div onDragOver={e=>e.preventDefault()} onDrop={handleDrop} onClick={()=>!selectedFile && inputRef.current.click()} className={`relative group flex flex-col items-center justify-center h-48 rounded-xl border-2 border-dashed transition-all ${selectedFile ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-600 hover:border-blue-400 cursor-pointer'}`}>
+      <input type="file" ref={inputRef} onChange={e=>onFileSelect(e.target.files[0])} accept="application/pdf" className="hidden" />
+      {selectedFile ? (
+        <div className="flex items-center justify-between w-full px-6">
+           <div className="flex items-center gap-4">
+             <div className="w-12 h-12 bg-white dark:bg-gray-700 rounded-lg shadow-sm flex items-center justify-center text-red-500"><FileText className="w-6 h-6"/></div>
+             <div className="text-left"><p className="font-semibold dark:text-white">{selectedFile.name}</p><p className="text-sm text-gray-500">{(selectedFile.size/1024/1024).toFixed(2)} MB</p></div>
+           </div>
+           <button onClick={(e)=>{e.stopPropagation(); onClear();}} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full"><X className="w-5 h-5"/></button>
+        </div>
+      ) : (
+        <>
+          <Upload className="w-8 h-8 text-gray-400 mb-3 group-hover:text-blue-500 transition-colors" />
+          <p className="font-medium text-gray-600 dark:text-gray-300">Click or drop PDF here</p>
+          <p className="text-xs text-gray-400 mt-1">Supports large files (500MB+)</p>
+        </>
+      )}
+    </div>
+  );
+};
+
+const Footer = () => (
+  <div className="text-center py-8 space-y-2">
+    <p className="text-xs text-gray-400 dark:text-gray-600">Powered by Google Gemini</p>
+    <a href="https://blackpiratex.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-gray-500 hover:text-blue-500 transition-colors">Made by blackpiratex <ExternalLink className="w-3 h-3" /></a>
+  </div>
+);
