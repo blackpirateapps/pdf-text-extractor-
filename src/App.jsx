@@ -13,9 +13,11 @@ const ENV_API_KEY = "";
 const MAX_FILE_SIZE_MB = 20;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
-// We use the stable Flash model as the default to avoid 404 errors
 const DEFAULT_MODEL = "gemini-1.5-flash"; 
 const DEFAULT_PROMPT = "Please transcribe the full text of this PDF document accurately. Maintain the logical flow of paragraphs. If there are tables, represent them with simple markdown formatting.";
+
+// Valid models allowlist to prevent 404s from stale localStorage data
+const VALID_MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b"];
 
 // --- Helper: File to Base64 ---
 const fileToGenerativePart = async (file) => {
@@ -376,15 +378,19 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   // Config State
-  // NOTE: We do not auto-load from localStorage if it contains the old/broken model name
-  // We sanitize the model name on init
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || "");
+  
+  // SAFE MODEL INITIALIZATION:
+  // We only accept model names that are in our allowed list. 
+  // This prevents 404s if the user has an old/deprecated model string saved in localStorage.
   const [modelName, setModelName] = useState(() => {
     const saved = localStorage.getItem('gemini_model');
-    // Force reset if it's the old preview model that causes 404s
-    if (saved && saved.includes("preview")) return DEFAULT_MODEL;
-    return saved || DEFAULT_MODEL;
+    if (saved && VALID_MODELS.includes(saved)) {
+      return saved;
+    }
+    return DEFAULT_MODEL;
   });
+  
   const [customPrompt, setCustomPrompt] = useState(() => localStorage.getItem('gemini_prompt') || DEFAULT_PROMPT);
 
   // Effect: Persist Config
@@ -430,9 +436,11 @@ export default function App() {
     setResult('');
     
     try {
+      // Stage 1: Reading File
       setProgressData({ percent: 10, text: 'Reading PDF...' });
       const filePart = await fileToGenerativePart(file);
       
+      // Stage 2: Preparing Request
       setProgressData({ percent: 30, text: 'Connecting to Gemini...' });
       
       const payload = {
@@ -446,6 +454,7 @@ export default function App() {
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${effectiveKey}`;
       
+      // Stage 3: Sending & Waiting
       setProgressData({ percent: 40, text: 'Analyzing document structure...' });
       
       let attempt = 0;
@@ -511,6 +520,7 @@ export default function App() {
       }
       
       setProgressData({ percent: 100, text: 'Complete!' });
+      
       setTimeout(() => {
         setResult(extractedText);
         setStatus('success');
@@ -520,8 +530,10 @@ export default function App() {
       console.error(err);
       if (err.message === "MODEL_NOT_FOUND") {
         setErrorMsg("Model not found. Please reset model settings.");
-        // Auto-recover logic could go here, but explicit user action is safer for now
-        // setModelName(DEFAULT_MODEL); // Optional auto-fix
+        // Auto-recover: force reset state to default if current model failed
+        if (modelName !== DEFAULT_MODEL) {
+             setModelName(DEFAULT_MODEL);
+        }
       } else {
         setErrorMsg(err.message || "Failed to extract text. Please try again.");
       }
