@@ -1,16 +1,20 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink } from 'lucide-react';
+import { Upload, FileText, X, Copy, Check, Loader2, Sparkles, ArrowRight, Moon, Sun, Settings, Key, AlertCircle, ExternalLink, RefreshCw } from 'lucide-react';
 
 // --- Configuration ---
-// In production (Vercel), uncomment the line below to pull from the "VITE_GEMINI_API_KEY" environment variable.
-const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+// In Vercel/Vite, we access environment variables via import.meta.env
+// FOR PRODUCTION: Uncomment the line below to use the environment variable
+// const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
 
+// FOR PREVIEW: We use an empty string so you can set the key in the UI settings
+const ENV_API_KEY = "";
 
 // 20MB is the rough limit for inline base64 payloads in the Gemini API
 const MAX_FILE_SIZE_MB = 20;
 const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
 
-const DEFAULT_MODEL = "gemini-1.5-flash"; // Using standard stable model for production
+// We use the stable Flash model as the default to avoid 404 errors
+const DEFAULT_MODEL = "gemini-1.5-flash"; 
 const DEFAULT_PROMPT = "Please transcribe the full text of this PDF document accurately. Maintain the logical flow of paragraphs. If there are tables, represent them with simple markdown formatting.";
 
 // --- Helper: File to Base64 ---
@@ -126,6 +130,9 @@ const SettingsModal = ({ isOpen, onClose, apiKey, setApiKey, model, setModel, pr
               <option value="gemini-1.5-pro">Gemini 1.5 Pro (Best Quality)</option>
               <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash 8B (Fastest)</option>
             </select>
+            <p className="text-xs text-gray-400 mt-2">
+              Note: If you get a 404 error, switch to "Gemini 1.5 Flash".
+            </p>
           </div>
 
           <div className="border-t border-gray-100 dark:border-gray-700 pt-4">
@@ -190,7 +197,8 @@ const Button = ({ children, onClick, disabled, variant = "primary", className = 
   const variants = {
     primary: "bg-blue-500 hover:bg-blue-600 text-white shadow-md hover:shadow-lg shadow-blue-500/20 disabled:shadow-none",
     secondary: "bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200",
-    ghost: "bg-transparent hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+    ghost: "bg-transparent hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200",
+    danger: "bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-900/20 dark:hover:bg-red-900/30 dark:text-red-400"
   };
 
   return (
@@ -368,8 +376,15 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   // Config State
+  // NOTE: We do not auto-load from localStorage if it contains the old/broken model name
+  // We sanitize the model name on init
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || "");
-  const [modelName, setModelName] = useState(() => localStorage.getItem('gemini_model') || DEFAULT_MODEL);
+  const [modelName, setModelName] = useState(() => {
+    const saved = localStorage.getItem('gemini_model');
+    // Force reset if it's the old preview model that causes 404s
+    if (saved && saved.includes("preview")) return DEFAULT_MODEL;
+    return saved || DEFAULT_MODEL;
+  });
   const [customPrompt, setCustomPrompt] = useState(() => localStorage.getItem('gemini_prompt') || DEFAULT_PROMPT);
 
   // Effect: Persist Config
@@ -390,11 +405,18 @@ export default function App() {
 
   const toggleTheme = () => setIsDarkMode(!isDarkMode);
 
-  const handleExtract = async () => {
+  const handleResetModel = () => {
+    setModelName(DEFAULT_MODEL);
+    setStatus('idle');
+    setErrorMsg('');
+    handleExtract(DEFAULT_MODEL); // Retry with default
+  };
+
+  const handleExtract = async (overrideModel = null) => {
     if (!file) return;
     
-    // Priority: Env Key -> User Entered Key
     const effectiveKey = ENV_API_KEY || apiKey;
+    const effectiveModel = overrideModel || modelName;
     
     if (!effectiveKey) {
         setShowSettings(true);
@@ -408,11 +430,9 @@ export default function App() {
     setResult('');
     
     try {
-      // Stage 1: Reading File
       setProgressData({ percent: 10, text: 'Reading PDF...' });
       const filePart = await fileToGenerativePart(file);
       
-      // Stage 2: Preparing Request
       setProgressData({ percent: 30, text: 'Connecting to Gemini...' });
       
       const payload = {
@@ -424,9 +444,8 @@ export default function App() {
         }]
       };
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${effectiveKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${effectiveModel}:generateContent?key=${effectiveKey}`;
       
-      // Stage 3: Sending & Waiting
       setProgressData({ percent: 40, text: 'Analyzing document structure...' });
       
       let attempt = 0;
@@ -458,6 +477,11 @@ export default function App() {
 
             if (!response.ok) {
                const errorData = await response.json().catch(() => ({}));
+               
+               // Handle specific HTTP errors
+               if (response.status === 404) {
+                 throw new Error("MODEL_NOT_FOUND");
+               }
                if (response.status === 403 || response.status === 400) {
                    throw new Error(errorData.error?.message || "Invalid API Key or Bad Request");
                }
@@ -474,7 +498,9 @@ export default function App() {
             break; // Success
 
           } catch (e) {
+            if (e.message === "MODEL_NOT_FOUND") throw e;
             if (attempt === maxRetries || e.message.includes("Invalid API Key")) throw e;
+            
             setProgressData({ percent: 40 + (attempt * 10), text: `Retrying connection (${attempt + 1}/${maxRetries})...` });
             await new Promise(resolve => setTimeout(resolve, delays[attempt]));
             attempt++;
@@ -485,7 +511,6 @@ export default function App() {
       }
       
       setProgressData({ percent: 100, text: 'Complete!' });
-      
       setTimeout(() => {
         setResult(extractedText);
         setStatus('success');
@@ -493,7 +518,13 @@ export default function App() {
 
     } catch (err) {
       console.error(err);
-      setErrorMsg(err.message || "Failed to extract text. Please try again.");
+      if (err.message === "MODEL_NOT_FOUND") {
+        setErrorMsg("Model not found. Please reset model settings.");
+        // Auto-recover logic could go here, but explicit user action is safer for now
+        // setModelName(DEFAULT_MODEL); // Optional auto-fix
+      } else {
+        setErrorMsg(err.message || "Failed to extract text. Please try again.");
+      }
       setStatus('error');
     }
   };
@@ -506,7 +537,6 @@ export default function App() {
     setProgressData({ percent: 0, text: '' });
   };
 
-  // Priority check for displaying logic
   const hasEnvKey = !!ENV_API_KEY;
   const hasUserKey = !!apiKey && apiKey.length > 5;
   const isReady = hasEnvKey || hasUserKey;
@@ -550,7 +580,7 @@ export default function App() {
                       </div>
                    )}
                   <div className="flex justify-end">
-                    <Button onClick={handleExtract} className="w-full md:w-auto" disabled={!isReady}>
+                    <Button onClick={() => handleExtract()} className="w-full md:w-auto" disabled={!isReady}>
                       Start Extraction
                       <ArrowRight className="w-4 h-4" />
                     </Button>
@@ -566,9 +596,19 @@ export default function App() {
               )}
 
               {status === 'error' && (
-                <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 rounded-lg text-sm flex items-center gap-2 animate-in shake">
-                  <div className="w-1 h-1 bg-red-500 rounded-full" />
-                  {errorMsg}
+                <div className="flex flex-col gap-3 animate-in shake">
+                  <div className="p-4 bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-300 rounded-lg text-sm flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                    {errorMsg}
+                  </div>
+                  {errorMsg.includes("Model not found") && (
+                     <div className="flex justify-end">
+                       <Button onClick={handleResetModel} variant="secondary" className="text-sm">
+                         <RefreshCw className="w-4 h-4" />
+                         Reset Model to Defaults
+                       </Button>
+                     </div>
+                  )}
                 </div>
               )}
             </div>
